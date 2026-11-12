@@ -1,4 +1,3 @@
-
 name: Build BringTech APK
 
 on:
@@ -7,34 +6,269 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Baixar codigo
-        uses: actions/checkout@v4
-
       - name: Configurar Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          
+
       - name: Instalar ferramentas Android
         run: |
           SDKM=$(ls $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | head -n 1)
-          echo "Usando: $SDKM"
           yes | $SDKM --licenses || true
           $SDKM "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Configurar Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+      - name: Criar projeto
+        run: |
+          mkdir -p ft/app/src/main/java/com/bringtech/ft
+          cd ft
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'BringTech'
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.7.3' apply false }
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.bringtech.ft'
+            compileSdk 35
+            defaultConfig {
+              applicationId 'com.bringtech.ft'
+              minSdk 24
+              targetSdk 35
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+              encoding 'UTF-8'
+            }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+            <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+            <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+            <application android:label="BringTech FT600" android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+              <activity android:name=".MainActivity" android:exported="true"
+                android:screenOrientation="sensorLandscape"
+                android:configChanges="orientation|screenSize|keyboardHidden">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/bringtech/ft/MainActivity.java <<'EOF'
+          package com.bringtech.ft;
 
-      - name: Compilar BringTech
-        run: gradle assembleDebug
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.bluetooth.*;
+          import android.content.Context;
+          import android.content.pm.PackageManager;
+          import android.graphics.*;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.*;
+          import java.io.*;
+          import java.util.*;
 
-      - name: Disponibilizar APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: BringTech-debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          public class MainActivity extends Activity {
+            static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+            static final int RPM = 0, SPD = 1, ECT = 2, IAT = 3, TPS = 4, LOAD = 5, VOLT = 6, MAP = 7, FUEL = 8;
+            static final int[] IDX = {SPD, ECT, IAT, VOLT, TPS, LOAD, MAP, FUEL};
+            static final String[] LBL = {"VELOCIDADE", "TEMP. AGUA", "TEMP. ADMISSAO", "BATERIA", "TPS", "CARGA MOTOR", "MAP", "COMBUSTIVEL"};
+            static final String[] UNI = {"km/h", "\u00B0C", "\u00B0C", "V", "%", "%", "kPa", "%"};
+            static final String[] FMT = {"%.0f", "%.0f", "%.0f", "%.1f", "%.0f", "%.0f", "%.0f", "%.0f"};
+            final double[] d = new double[9];
+            volatile String status = "TOQUE PARA CONECTAR";
+            volatile boolean ok = false;
+            volatile int gen = 0;
+            Dash dash;
+
+            protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              Arrays.fill(d, Double.NaN);
+              getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+              dash = new Dash(this);
+              setContentView(dash);
+              dash.setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                  | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+              dash.setOnClickListener(v -> { if (!ok) pick(); });
+              dash.setOnLongClickListener(v -> { pick(); return true; });
+              start();
+            }
+
+            boolean perm() {
+              if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 1);
+                return false;
+              }
+              return true;
+            }
+
+            public void onRequestPermissionsResult(int c, String[] p, int[] r) {
+              if (r.length > 0 && r[0] == PackageManager.PERMISSION_GRANTED) start();
+              else status = "SEM PERMISSAO DE BLUETOOTH";
+            }
+
+            void start() {
+              if (!perm()) return;
+              String m = getPreferences(MODE_PRIVATE).getString("mac", null);
+              if (m == null) pick(); else connect(m);
+            }
+
+            void pick() {
+              if (!perm()) return;
+              BluetoothAdapter a = BluetoothAdapter.getDefaultAdapter();
+              List<String> names = new ArrayList<>(), macs = new ArrayList<>();
+              if (a != null) for (BluetoothDevice x : a.getBondedDevices()) {
+                names.add(x.getName() + "\n" + x.getAddress());
+                macs.add(x.getAddress());
+              }
+              names.add("Modo demonstracao (sem carro)");
+              macs.add("DEMO");
+              new AlertDialog.Builder(this)
+                  .setTitle("Escolha o scanner OBD2 (pareie antes em Ajustes > Bluetooth)")
+                  .setItems(names.toArray(new String[0]), (dl, i) -> {
+                    getPreferences(MODE_PRIVATE).edit().putString("mac", macs.get(i)).apply();
+                    connect(macs.get(i));
+                  }).show();
+            }
+
+            void connect(String mac) {
+              final int my = ++gen;
+              ok = false;
+              new Thread(() -> {
+                while (my == gen) {
+                  BluetoothSocket s = null;
+                  try {
+                    if (mac.equals("DEMO")) { demo(my); return; }
+                    status = "CONECTANDO...";
+                    BluetoothAdapter a = BluetoothAdapter.getDefaultAdapter();
+                    if (!a.isEnabled()) { status = "LIGUE O BLUETOOTH"; Thread.sleep(3000); continue; }
+                    a.cancelDiscovery();
+                    BluetoothDevice dev = a.getRemoteDevice(mac);
+                    try {
+                      s = dev.createRfcommSocketToServiceRecord(SPP);
+                      s.connect();
+                    } catch (IOException e) {
+                      s = (BluetoothSocket) dev.getClass().getMethod("createRfcommSocket", int.class).invoke(dev, 1);
+                      s.connect();
+                    }
+                    InputStream in = s.getInputStream();
+                    OutputStream out = s.getOutputStream();
+                    status = "INICIANDO SCANNER...";
+                    for (String c : new String[]{"ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0", "0100"}) cmd(in, out, c);
+                    ok = true;
+                    int n = 0, miss = 0;
+                    while (my == gen) {
+                      int[] r = pid(in, out, "0C");
+                      if (r != null && r.length >= 2) { d[RPM] = (r[0] * 256 + r[1]) / 4.0; miss = 0; } else miss++;
+                      if ((r = pid(in, out, "0D")) != null) d[SPD] = r[0];
+                      switch (n++ % 7) {
+                        case 0: if ((r = pid(in, out, "05")) != null) d[ECT] = r[0] - 40; break;
+                        case 1: if ((r = pid(in, out, "0F")) != null) d[IAT] = r[0] - 40; break;
+                        case 2: if ((r = pid(in, out, "11")) != null) d[TPS] = r[0] * 100 / 255.0; break;
+                        case 3: if ((r = pid(in, out, "04")) != null) d[LOAD] = r[0] * 100 / 255.0; break;
+                        case 4: if ((r = pid(in, out, "0B")) != null) d[MAP] = r[0]; break;
+                        case 5: if ((r = pid(in, out, "2F")) != null) d[FUEL] = r[0] * 100 / 255.0; break;
+                        default:
+                          try { d[VOLT] = Double.parseDouble(cmd(in, out, "ATRV").toUpperCase().replaceAll("[^0-9.]", "")); } catch (NumberFormatException e) { }
+                      }
+                      if (miss > 3) { Arrays.fill(d, Double.NaN); status = "SEM RESPOSTA DO VEICULO - LIGUE A IGNICAO"; }
+                      else status = "CONECTADO";
+                    }
+                  } catch (Exception e) {
+                    ok = false;
+                    status = "SEM CONEXAO - TENTANDO DE NOVO...";
+                    try { Thread.sleep(3000); } catch (Exception x) { }
+                  } finally {
+                    try { if (s != null) s.close(); } catch (Exception x) { }
+                  }
+                }
+              }).start();
+            }
+
+            void demo(int my) throws InterruptedException {
+              status = "MODO DEMONSTRACAO";
+              ok = true;
+              long t0 = System.currentTimeMillis();
+              while (my == gen) {
+                double k = (Math.sin((System.currentTimeMillis() - t0) / 1000.0 * 0.7) + 1) / 2;
+                d[RPM] = 900 + k * 5600; d[SPD] = k * 120; d[ECT] = 88 + k * 10; d[IAT] = 32 + k * 6;
+                d[TPS] = k * 80; d[LOAD] = 20 + k * 60; d[VOLT] = 13.8; d[MAP] = 35 + k * 90; d[FUEL] = 62;
+                Thread.sleep(50);
+              }
+            }
+
+            static String cmd(InputStream in, OutputStream out, String c) throws Exception {
+              while (in.available() > 0) in.read();
+              out.write((c + "\r").getBytes());
+              out.flush();
+              StringBuilder sb = new StringBuilder();
+              long t = System.currentTimeMillis();
+              while (System.currentTimeMillis() - t < 10000) {
+                if (in.available() > 0) {
+                  int b = in.read();
+                  if (b == '>') break;
+                  sb.append((char) b);
+                } else Thread.sleep(5);
+              }
+              return sb.toString();
+            }
+
+            static int[] pid(InputStream in, OutputStream out, String p) throws Exception {
+              for (String l : cmd(in, out, "01" + p).toUpperCase().split("[\r\n]+")) {
+                l = l.replace(" ", "");
+                if (l.startsWith("41" + p)) {
+                  try {
+                    String h = l.substring(4);
+                    int[] v = new int[h.length() / 2];
+                    for (int i = 0; i < v.length; i++) v[i] = Integer.parseInt(h.substring(2 * i, 2 * i + 2), 16);
+                    if (v.length > 0) return v;
+                  } catch (Exception e) { }
+                }
+              }
+              return null;
+            }
+
+            class Dash extends View {
+              Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              double shown = 0;
+
+              Dash(Context c) { super(c); p.setTypeface(Typeface.DEFAULT_BOLD); }
+
+              void txt(Canvas c, String s, float x, float y, float size, int col, Paint.Align al) {
+                p.setTextSize(size); p.setColor(col); p.setTextAlign(al);
+                c.drawText(s, x, y, p);
+              }
+
+              protected void onDraw(Canvas c) {
+                float w = getWidth(), h = getHeight();
+                c.drawColor(Color.BLACK);
+                p.setStyle(Paint.Style.FILL);
+                double r = Double.isNaN(d[RPM]) ? 0 : d[RPM];
+                shown += (r - shown) * 0.25;
+                int n = 40;
+                float bw = w / n, bt = h * 0.04f, bh = h * 0.16f;
+                for (int i = 0; i < n; i++) {
+                  double lo = i * 8000.0 / n;
+                  int col = lo >= 6400 ? Color.rgb(255, 40, 40) : lo >= 5400 ? Color.rgb(255, 190, 0) : Color.rgb(0, 220, 90);
+                  p.setColor(shown > lo ? col : Color.rgb(30, 30, 30));
+                  c.drawRect(i * bw + 3, bt, (i + 1) * bw - 3, bt + bh, p);
+                }
+                txt(c, "RPM", w / 2, h * 0.28f, h * 0.05f, Color.rgb(255, 140, 0), Paint.Align.CENTER);
+                txt(c, String.valueOf(Math.round(shown)), w / 2, h * 0.52f, h * 0.30f, Color.WHITE, Paint.Align.CENTER);
+                float g = w * 0.015f, tw = (w -
