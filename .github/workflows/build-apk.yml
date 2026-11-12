@@ -271,4 +271,36 @@ jobs:
                 }
                 txt(c, "RPM", w / 2, h * 0.28f, h * 0.05f, Color.rgb(255, 140, 0), Paint.Align.CENTER);
                 txt(c, String.valueOf(Math.round(shown)), w / 2, h * 0.52f, h * 0.30f, Color.WHITE, Paint.Align.CENTER);
-                float g = w * 0.015f, tw = (w -
+                                float g = w * 0.015f, tw = (w - 5 * g) / 4, th = h * 0.17f;
+                for (int i = 0; i < 8; i++) {
+                  float x = g + (i % 4) * (tw + g), y = h * 0.58f + (i / 4) * (th + g);
+                  double v = d[IDX[i]];
+                  p.setColor(Color.rgb(20, 20, 20));
+                  c.drawRoundRect(x, y, x + tw, y + th, 16, 16, p);
+                  txt(c, LBL[i], x + tw * 0.05f, y + th * 0.27f, th * 0.19f, Color.rgb(255, 140, 0), Paint.Align.LEFT);
+                  boolean bad = (IDX[i] == ECT && v > 105) || (IDX[i] == VOLT && v < 11.8);
+                  txt(c, Double.isNaN(v) ? "--" : String.format(Locale.US, FMT[i], v), x + tw * 0.70f, y + th * 0.88f,
+                      th * 0.50f, bad ? Color.rgb(255, 40, 40) : Color.WHITE, Paint.Align.RIGHT);
+                  txt(c, UNI[i], x + tw * 0.73f, y + th * 0.88f, th * 0.18f, Color.GRAY, Paint.Align.LEFT);
+                }
+                txt(c, status, w / 2, h * 0.985f, h * 0.035f, Color.GRAY, Paint.Align.CENTER);
+                postInvalidateOnAnimation();
+              }
+            }
+          }
+          EOF
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Compilar
+        working-directory: ft
+        run: gradle assembleDebug --stacktrace
+
+      - name: Disponibilizar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BringTech-FT600-APK
+          path: ft/app/build/outputs/apk/debug/app-debug.apk
